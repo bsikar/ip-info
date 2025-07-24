@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# IP Address Service - Production Deployment Script
-# Automated deployment script for setting up the IP service on a production server.
+# IP Address Service - Production Deployment Script v1.2.0
+# Enhanced automated deployment script with improved error handling and configuration validation.
 # Handles virtual environment, dependencies, configuration, and systemd service setup.
 #
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Script version for troubleshooting
-SCRIPT_VERSION="1.1.0"
+SCRIPT_VERSION="1.2.0"
 
 # Configuration variables
 SERVICE_NAME="ip-service"
@@ -83,11 +83,10 @@ validate_required_files() {
 # Check if we're running from the installation directory (and handle it)
 handle_installation_directory() {
     if [[ "$SCRIPT_DIR" == "$INSTALL_DIR" ]]; then
-        log_warning "Running from installation directory. This is not recommended."
-        log_info "Creating temporary backup and working directory..."
+        log_warning "Running from installation directory. Creating temporary backup..."
         
         # Create temporary directory for the deployment
-        TEMP_DIR="/tmp/ip-service-deploy-$"
+        TEMP_DIR="/tmp/ip-service-deploy-$$"
         mkdir -p "$TEMP_DIR"
         
         # Copy current files to temp directory (except for venv, logs, etc.)
@@ -97,6 +96,11 @@ handle_installation_directory() {
                 cp "$file" "$TEMP_DIR/"
             fi
         done
+        
+        # Copy .env.example if it exists
+        if [[ -f ".env.example" ]]; then
+            cp ".env.example" "$TEMP_DIR/"
+        fi
         
         # Update SCRIPT_DIR to point to temp directory
         SCRIPT_DIR="$TEMP_DIR"
@@ -108,7 +112,10 @@ handle_installation_directory() {
 install_system_dependencies() {
     log_info "Installing system dependencies..."
     
+    # Update package list
     apt-get update -q
+    
+    # Install essential packages
     apt-get install -y \
         python3 \
         python3-pip \
@@ -118,7 +125,10 @@ install_system_dependencies() {
         curl \
         wget \
         git \
-        logrotate
+        logrotate \
+        software-properties-common \
+        apt-transport-https \
+        ca-certificates
     
     log_success "System dependencies installed"
 }
@@ -138,6 +148,13 @@ create_service_user() {
 create_directories() {
     log_info "Creating directory structure..."
     
+    # Stop service if running to avoid file conflicts
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        log_info "Stopping existing service..."
+        systemctl stop "${SERVICE_NAME}"
+    fi
+    
+    # Create directories
     mkdir -p "${INSTALL_DIR}"
     mkdir -p "${LOG_DIR}"
     
@@ -155,10 +172,16 @@ create_directories() {
 create_virtual_environment() {
     log_info "Creating Python virtual environment..."
     
-    # Create venv as service user
+    # Remove existing venv if it exists to ensure clean installation
+    if [[ -d "${VENV_DIR}" ]]; then
+        log_info "Removing existing virtual environment..."
+        rm -rf "${VENV_DIR}"
+    fi
+    
+    # Create new venv as service user
     sudo -u "${SERVICE_USER}" python3 -m venv "${VENV_DIR}"
     
-    # Upgrade pip
+    # Upgrade pip, setuptools, and wheel
     sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install --upgrade pip setuptools wheel
     
     log_success "Virtual environment created"
@@ -174,12 +197,27 @@ install_python_dependencies() {
             cp "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/"
             chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/requirements.txt"
             log_info "Copied requirements.txt"
-        else
-            log_info "requirements.txt already in place"
         fi
         
-        # Install dependencies
-        sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"
+        # Install dependencies with verbose output for debugging
+        if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"; then
+            log_error "Failed to install Python dependencies"
+            log_info "Trying to install dependencies individually for debugging..."
+            
+            # Try installing Flask specifically
+            if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install Flask==3.0.0; then
+                log_info "Flask installed successfully"
+            else
+                log_error "Failed to install Flask"
+                exit 1
+            fi
+            
+            # Try other dependencies
+            sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install Werkzeug==3.0.1 || true
+            sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install gunicorn==21.2.0 || true
+            sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install python-dotenv==1.0.0 || true
+            sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install ipaddress==1.0.23 || true
+        fi
         
         log_success "Python dependencies installed"
     else
@@ -223,11 +261,11 @@ generate_secret_key() {
 setup_environment() {
     log_info "Setting up environment configuration..."
     
-    # Create .env file from template
+    # Create .env file from template or create a basic one
     if [[ -f "${SCRIPT_DIR}/.env.example" ]]; then
         cp "${SCRIPT_DIR}/.env.example" "${INSTALL_DIR}/.env"
     elif [[ ! -f "${INSTALL_DIR}/.env" ]]; then
-        log_warning ".env.example not found, creating basic .env file"
+        log_info "Creating basic .env file..."
         cat > "${INSTALL_DIR}/.env" << 'EOF'
 # IP Address Service - Environment Configuration
 FLASK_ENV=production
@@ -239,6 +277,11 @@ TRUSTED_PROXIES=127.0.0.1/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
 GUNICORN_WORKERS=4
 LOG_LEVEL=INFO
 LOG_FILE=/opt/ip-service/logs/ip_service.log
+GUNICORN_ACCESS_LOG=/opt/ip-service/logs/access.log
+GUNICORN_ERROR_LOG=/opt/ip-service/logs/error.log
+GUNICORN_LOG_LEVEL=info
+MAX_CONTENT_LENGTH=1024
+ENABLE_DEBUG_HEADERS=false
 EOF
     fi
     
@@ -299,6 +342,62 @@ install_systemd_service() {
     fi
 }
 
+# Test Python imports individually
+test_python_imports() {
+    log_info "Testing Python imports individually..."
+    
+    cd "${INSTALL_DIR}"
+    
+    # Test basic Python functionality
+    if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "print('Python works')" &>/dev/null; then
+        log_error "Basic Python test failed"
+        return 1
+    fi
+    
+    # Test Flask import
+    if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import flask; print('Flask OK')" 2>/dev/null; then
+        log_info "✓ Flask import successful"
+    else
+        log_error "✗ Flask import failed"
+        return 1
+    fi
+    
+    # Test other core imports
+    local imports=("werkzeug" "gunicorn" "ipaddress" "json" "logging" "os" "sys")
+    for import_name in "${imports[@]}"; do
+        if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import ${import_name}; print('${import_name} OK')" 2>/dev/null; then
+            log_info "✓ ${import_name} import successful"
+        else
+            log_warning "✗ ${import_name} import failed (may not be critical)"
+        fi
+    done
+    
+    # Test config import with better error handling
+    if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "
+import sys
+sys.path.insert(0, '.')
+try:
+    import config
+    print('Config import successful')
+except Exception as e:
+    print(f'Config import failed: {e}')
+    # Try basic import test
+    try:
+        exec(open('config.py').read())
+        print('Config file syntax OK')
+    except Exception as e2:
+        print(f'Config syntax error: {e2}')
+        exit(1)
+" 2>&1; then
+        log_info "✓ Config module tested"
+    else
+        log_error "✗ Config module test failed"
+        return 1
+    fi
+    
+    return 0
+}
+
 # Validate the configuration before starting
 validate_configuration() {
     log_info "Validating configuration..."
@@ -315,28 +414,71 @@ validate_configuration() {
         exit 1
     fi
     
-    # Test Python environment and imports
-    log_info "Testing Python environment..."
-    if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import app; print('App imported successfully')" &>/dev/null; then
-        log_error "Failed to import Flask application"
-        log_info "Testing imports individually..."
-        
-        # Test individual components
-        if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import flask; print('Flask OK')" 2>/dev/null; then
-            log_error "Flask import failed"
-        fi
-        
-        if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import config; print('Config OK')" 2>/dev/null; then
-            log_error "Config import failed"
-        fi
-        
+    # Test Python imports first
+    if ! test_python_imports; then
+        log_error "Python import validation failed"
+        exit 1
+    fi
+    
+    # Test app import with better error handling
+    log_info "Testing application import..."
+    cd "${INSTALL_DIR}"
+    
+    # Create a test script to validate the app
+    cat > "${INSTALL_DIR}/test_app.py" << 'EOF'
+#!/usr/bin/env python3
+import sys
+import os
+sys.path.insert(0, '.')
+
+try:
+    # Test config import first
+    print("Testing config import...")
+    import config
+    print("✓ Config imported successfully")
+    
+    # Test app import
+    print("Testing app import...")
+    import app
+    print("✓ App imported successfully")
+    
+    # Test Flask app creation
+    print("Testing Flask app...")
+    flask_app = app.app
+    if flask_app:
+        print("✓ Flask app created successfully")
+    else:
+        print("✗ Flask app is None")
+        sys.exit(1)
+    
+    print("All imports successful!")
+    
+except ImportError as e:
+    print(f"✗ Import error: {e}")
+    sys.exit(1)
+except Exception as e:
+    print(f"✗ General error: {e}")
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
+EOF
+    
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/test_app.py"
+    
+    if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" "${INSTALL_DIR}/test_app.py"; then
+        log_success "Application import test passed"
+        rm -f "${INSTALL_DIR}/test_app.py"
+    else
+        log_error "Application import test failed"
+        rm -f "${INSTALL_DIR}/test_app.py"
         exit 1
     fi
     
     # Test gunicorn configuration
     log_info "Testing Gunicorn configuration..."
-    cd "${INSTALL_DIR}"
-    if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/gunicorn" --check-config --config gunicorn.conf.py app:app; then
+    if sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/gunicorn" --check-config --config gunicorn.conf.py app:app; then
+        log_success "Gunicorn configuration test passed"
+    else
         log_error "Gunicorn configuration test failed"
         exit 1
     fi
@@ -391,7 +533,7 @@ setup_firewall() {
     fi
 }
 
-# Test the installation
+# Test the installation with enhanced validation
 test_installation() {
     log_info "Testing installation..."
     
@@ -400,39 +542,50 @@ test_installation() {
     
     # Start the service
     log_info "Starting the service..."
-    systemctl start "${SERVICE_NAME}"
+    if systemctl start "${SERVICE_NAME}"; then
+        log_success "Service started successfully"
+    else
+        log_error "Failed to start service"
+        log_info "Checking service status..."
+        systemctl status "${SERVICE_NAME}" --no-pager -l || true
+        log_info "Checking recent logs..."
+        journalctl -u "${SERVICE_NAME}" -n 20 --no-pager || true
+        exit 1
+    fi
     
-    # Wait a moment for startup
+    # Wait for startup
+    log_info "Waiting for service to initialize..."
     sleep 5
     
     # Check service status
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         log_success "Service is running"
         
-        # Get the configured port
+        # Get the configured port and host
         local port
         port=$(grep -oP 'PORT=\K\d+' "${INSTALL_DIR}/.env" 2>/dev/null || echo "5000")
         
-        # Get the configured host
         local host
         host=$(grep -oP 'HOST=\K[^\s]+' "${INSTALL_DIR}/.env" 2>/dev/null || echo "127.0.0.1")
         
+        log_info "Service configured for ${host}:${port}"
+        
         # Test health endpoint with retries
         log_info "Testing health endpoint..."
-        local max_retries=5
+        local max_retries=10
         local retry=0
         local health_ok=false
         
         while [[ $retry -lt $max_retries ]]; do
-            if curl -f -s --max-time 5 "http://${host}:${port}/health" > /dev/null 2>&1; then
+            if curl -f -s --max-time 10 --connect-timeout 5 "http://${host}:${port}/health" > /dev/null 2>&1; then
                 health_ok=true
                 break
             fi
             
             retry=$((retry + 1))
             if [[ $retry -lt $max_retries ]]; then
-                log_info "Health check attempt ${retry} failed, retrying in 2 seconds..."
-                sleep 2
+                log_info "Health check attempt ${retry}/${max_retries} failed, retrying in 3 seconds..."
+                sleep 3
             fi
         done
         
@@ -442,23 +595,40 @@ test_installation() {
             # Test main endpoint
             log_info "Testing main IP endpoint..."
             local response
-            if response=$(curl -f -s --max-time 5 "http://${host}:${port}/"); then
+            if response=$(curl -f -s --max-time 10 --connect-timeout 5 "http://${host}:${port}/"); then
                 if echo "$response" | grep -q '"status":"success"\|"status":"error"'; then
                     log_success "Main endpoint responding with valid JSON"
+                    
+                    # Show sample response
+                    log_info "Sample response: $(echo "$response" | head -c 200)..."
                 else
                     log_warning "Main endpoint responding but JSON format unexpected"
+                    log_info "Response: $response"
                 fi
             else
                 log_warning "Main endpoint not responding (this may be normal if no IP is detected)"
             fi
+            
+            # Test info endpoint
+            log_info "Testing info endpoint..."
+            if curl -f -s --max-time 5 "http://${host}:${port}/info" > /dev/null 2>&1; then
+                log_success "Info endpoint responding"
+            else
+                log_warning "Info endpoint not responding"
+            fi
+            
         else
             log_warning "Health check endpoint not responding after ${max_retries} attempts"
-            log_warning "Service may need additional configuration"
+            log_warning "Service may need additional configuration or time to start"
+            
+            # Show recent logs for debugging
+            log_info "Recent service logs:"
+            journalctl -u "${SERVICE_NAME}" -n 10 --no-pager || true
         fi
         
         # Show service status
         log_info "Service status:"
-        systemctl status "${SERVICE_NAME}" --no-pager -l | head -10
+        systemctl status "${SERVICE_NAME}" --no-pager -l | head -15
         
     else
         log_error "Service failed to start"
@@ -466,7 +636,7 @@ test_installation() {
         
         # Show recent logs
         log_info "Recent service logs:"
-        journalctl -u "${SERVICE_NAME}" -n 20 --no-pager
+        journalctl -u "${SERVICE_NAME}" -n 30 --no-pager
         
         exit 1
     fi
@@ -495,6 +665,10 @@ show_post_install_info() {
             echo "  ip.example.com {"
             echo "      reverse_proxy 127.0.0.1:5000"
             echo "  }"
+            echo
+            echo "Test locally:"
+            echo "  curl http://127.0.0.1:5000/"
+            echo "  curl http://127.0.0.1:5000/health"
             ;;
         "network")
             echo "=== NETWORK MODE ==="
@@ -503,10 +677,12 @@ show_post_install_info() {
             echo
             echo "Caddy configuration (on your 192.168.x.x server):"
             echo "  ip.example.com {"
-            echo "      reverse_proxy YOUR_FLASK_SERVER_IP:5000"
+            echo "      reverse_proxy $(hostname -I | awk '{print $1}'):5000"
             echo "  }"
             echo
-            echo "Replace YOUR_FLASK_SERVER_IP with this server's IP address."
+            echo "Test from network:"
+            echo "  curl http://$(hostname -I | awk '{print $1}'):5000/"
+            echo "  curl http://$(hostname -I | awk '{print $1}'):5000/health"
             ;;
         "direct")
             echo "=== DIRECT EXTERNAL ACCESS MODE ==="
@@ -514,66 +690,93 @@ show_post_install_info() {
             echo "No reverse proxy needed - less secure but simpler setup."
             echo
             echo "Test external access:"
+            echo "  curl http://$(curl -s ifconfig.me):5000/"
             echo "  curl http://YOUR_SERVER_IP:5000/"
             ;;
     esac
     
     echo
-    echo "Next steps:"
-    echo "1. Edit the configuration file: ${INSTALL_DIR}/.env"
-    echo "2. Set your SECRET_KEY and other environment variables"
-    if [[ "${DEPLOYMENT_MODE}" != "direct" ]]; then
-        echo "3. Configure your Caddy server to point to this Flask app"
-    fi
-    echo "4. Restart the service: sudo systemctl restart ${SERVICE_NAME}"
+    echo "Service Information:"
+    echo "- Installation directory: ${INSTALL_DIR}"
+    echo "- Configuration file: ${INSTALL_DIR}/.env"
+    echo "- Log directory: ${LOG_DIR}"
+    echo "- Service user: ${SERVICE_USER}"
+    echo "- Python virtual env: ${VENV_DIR}"
     echo
     echo "Useful commands:"
     echo "- Check service status: sudo systemctl status ${SERVICE_NAME}"
-    echo "- View logs: sudo journalctl -u ${SERVICE_NAME} -f"
+    echo "- View real-time logs: sudo journalctl -u ${SERVICE_NAME} -f"
+    echo "- Restart service: sudo systemctl restart ${SERVICE_NAME}"
     echo "- Stop service: sudo systemctl stop ${SERVICE_NAME}"
     echo "- Start service: sudo systemctl start ${SERVICE_NAME}"
-    echo "- Restart service: sudo systemctl restart ${SERVICE_NAME}"
+    echo "- View configuration: cat ${INSTALL_DIR}/.env"
+    echo "- Test health endpoint: curl http://127.0.0.1:5000/health"
+    echo "- Test main endpoint: curl http://127.0.0.1:5000/"
     echo
-    echo "Configuration file: ${INSTALL_DIR}/.env"
-    echo "Application logs: ${LOG_DIR}/"
-    echo "Service file: ${SYSTEMD_SERVICE_FILE}"
+    echo "Log files:"
+    echo "- Application logs: ${LOG_DIR}/ip_service.log"
+    echo "- Access logs: ${LOG_DIR}/access.log"
+    echo "- Error logs: ${LOG_DIR}/error.log"
+    echo "- System logs: journalctl -u ${SERVICE_NAME}"
+    echo
+    log_success "Deployment completed successfully!"
+}
+
+# Show usage information
+show_usage() {
+    echo "IP Address Service Deployment Script v${SCRIPT_VERSION}"
+    echo "Usage: $0 [localhost|network|direct]"
+    echo
+    echo "Deployment modes:"
+    echo "  network (default) - Caddy on different server (192.168.x.x)"
+    echo "                     Binds to 0.0.0.0 - accepts network connections"
+    echo "  localhost         - Caddy on same server as Flask app"
+    echo "                     Binds to 127.0.0.1 - most secure"
+    echo "  direct            - Direct external access (no reverse proxy)"
+    echo "                     Binds to 0.0.0.0 - least secure"
+    echo
+    echo "Examples:"
+    echo "  $0              # Deploy for Caddy on different server (most common)"
+    echo "  $0 network      # Deploy for Caddy on different server"
+    echo "  $0 localhost    # Deploy for Caddy on same server"
+    echo "  $0 direct       # Deploy for direct external access"
+    echo
+    echo "Features:"
+    echo "  ✓ Automatic dependency installation"
+    echo "  ✓ Python virtual environment setup"
+    echo "  ✓ Secure SECRET_KEY generation"
+    echo "  ✓ Systemd service installation"
+    echo "  ✓ Log rotation configuration"
+    echo "  ✓ Comprehensive testing and validation"
+    echo "  ✓ Firewall configuration (if UFW available)"
+    echo "  ✓ Robust error handling and recovery"
 }
 
 # Main deployment function
 main() {
     # Get first argument safely and set deployment mode
     local arg1="${1:-}"
-    DEPLOYMENT_MODE="${arg1:-network}"  # 'localhost', 'network', or 'direct'
     
     # Show usage if help requested
-    if [[ "$arg1" == "-h" || "$arg1" == "--help" ]]; then
-        echo "IP Address Service Deployment Script v${SCRIPT_VERSION}"
-        echo "Usage: $0 [localhost|network|direct]"
-        echo
-        echo "Deployment modes:"
-        echo "  network (default) - Caddy on different server (192.168.x.x)"
-        echo "                     Binds to 0.0.0.0 - accepts network connections"
-        echo "  localhost         - Caddy on same server as Flask app"
-        echo "                     Binds to 127.0.0.1 - most secure"
-        echo "  direct            - Direct external access (no reverse proxy)"
-        echo "                     Binds to 0.0.0.0 - least secure"
-        echo
-        echo "Examples:"
-        echo "  $0              # Deploy for Caddy on different server (most common)"
-        echo "  $0 network      # Deploy for Caddy on different server"
-        echo "  $0 localhost    # Deploy for Caddy on same server"
-        echo "  $0 direct       # Deploy for direct external access"
-        echo
-        echo "The script will:"
-        echo "  - Install system dependencies"
-        echo "  - Create Python virtual environment"
-        echo "  - Install Python packages"
-        echo "  - Configure application files"
-        echo "  - Generate secure SECRET_KEY automatically"
-        echo "  - Install and enable systemd service"
-        echo "  - Test the installation"
+    if [[ "$arg1" == "-h" || "$arg1" == "--help" || "$arg1" == "help" ]]; then
+        show_usage
         exit 0
     fi
+    
+    # Set deployment mode with default
+    DEPLOYMENT_MODE="${arg1:-network}"
+    
+    # Validate deployment mode
+    case "${DEPLOYMENT_MODE}" in
+        "localhost"|"network"|"direct")
+            ;;
+        *)
+            log_error "Invalid deployment mode: ${DEPLOYMENT_MODE}"
+            log_error "Valid modes: localhost, network, direct"
+            show_usage
+            exit 1
+            ;;
+    esac
     
     log_info "Starting deployment of ${SERVICE_NAME} v${SCRIPT_VERSION} in ${DEPLOYMENT_MODE} mode..."
     
@@ -603,7 +806,8 @@ main() {
 }
 
 # Handle script interruption
-trap 'log_error "Deployment interrupted"; exit 1' INT TERM
+trap 'log_error "Deployment interrupted"; cleanup; exit 1' INT TERM
 
 # Run main function
 main "$@"
+
