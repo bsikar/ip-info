@@ -1,0 +1,55 @@
+[Unit]
+Description=IP Address Service - Public IP Detection API
+Documentation=https://github.com/bsikar/ipinfo
+After=network.target
+Wants=network.target
+
+[Service]
+Type=notify
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/ip-service
+Environment=PATH=/opt/ip-service/venv/bin
+Environment=FLASK_ENV=production
+Environment=PYTHONPATH=/opt/ip-service
+Environment=PYTHONUNBUFFERED=1
+
+# Main process
+ExecStart=/opt/ip-service/venv/bin/gunicorn --config gunicorn.conf.py app:app
+ExecReload=/bin/kill -s HUP $MAINPID
+KillMode=mixed
+TimeoutStopSec=5
+PrivateTmp=true
+
+# Security settings
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/ip-service/logs
+ReadWritePaths=/tmp
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+RemoveIPC=yes
+PrivateDevices=yes
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+# Restart policy
+Restart=on-failure
+RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=3
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ip-service
+
+[Install]
+WantedBy=multi-user.target
