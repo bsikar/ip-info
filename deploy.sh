@@ -7,6 +7,9 @@
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
+# Script version for troubleshooting
+SCRIPT_VERSION="1.1.0"
+
 # Configuration variables
 SERVICE_NAME="ip-service"
 SERVICE_USER="www-data"
@@ -15,6 +18,9 @@ INSTALL_DIR="/opt/${SERVICE_NAME}"
 VENV_DIR="${INSTALL_DIR}/venv"
 LOG_DIR="${INSTALL_DIR}/logs"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+
+# Get the directory where this script is located
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Global deployment mode variable
 DEPLOYMENT_MODE=""
@@ -48,6 +54,53 @@ check_root() {
     if [[ $EUID -ne 0 ]]; then
         log_error "This script must be run as root (use sudo)"
         exit 1
+    fi
+}
+
+# Validate required files exist
+validate_required_files() {
+    log_info "Validating required files..."
+    
+    local required_files=("app.py" "config.py" "gunicorn.conf.py" "requirements.txt" "ip-service.service")
+    local missing_files=()
+    
+    for file in "${required_files[@]}"; do
+        if [[ ! -f "${SCRIPT_DIR}/${file}" ]]; then
+            missing_files+=("$file")
+        fi
+    done
+    
+    if [[ ${#missing_files[@]} -gt 0 ]]; then
+        log_error "Missing required files: ${missing_files[*]}"
+        log_error "Make sure you're running this script from the project directory"
+        log_error "Required files: ${required_files[*]}"
+        exit 1
+    fi
+    
+    log_success "All required files found"
+}
+
+# Check if we're running from the installation directory (and handle it)
+handle_installation_directory() {
+    if [[ "$SCRIPT_DIR" == "$INSTALL_DIR" ]]; then
+        log_warning "Running from installation directory. This is not recommended."
+        log_info "Creating temporary backup and working directory..."
+        
+        # Create temporary directory for the deployment
+        TEMP_DIR="/tmp/ip-service-deploy-$"
+        mkdir -p "$TEMP_DIR"
+        
+        # Copy current files to temp directory (except for venv, logs, etc.)
+        local files_to_copy=("app.py" "config.py" "gunicorn.conf.py" "requirements.txt" "ip-service.service" "deploy.sh")
+        for file in "${files_to_copy[@]}"; do
+            if [[ -f "$file" ]]; then
+                cp "$file" "$TEMP_DIR/"
+            fi
+        done
+        
+        # Update SCRIPT_DIR to point to temp directory
+        SCRIPT_DIR="$TEMP_DIR"
+        log_info "Using temporary directory: $TEMP_DIR"
     fi
 }
 
@@ -115,17 +168,22 @@ create_virtual_environment() {
 install_python_dependencies() {
     log_info "Installing Python dependencies..."
     
-    # Copy requirements.txt to install directory
-    if [[ -f "requirements.txt" ]]; then
-        cp requirements.txt "${INSTALL_DIR}/"
-        chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/requirements.txt"
+    # Copy requirements.txt to install directory if not already there
+    if [[ -f "${SCRIPT_DIR}/requirements.txt" ]]; then
+        if [[ "${SCRIPT_DIR}/requirements.txt" != "${INSTALL_DIR}/requirements.txt" ]]; then
+            cp "${SCRIPT_DIR}/requirements.txt" "${INSTALL_DIR}/"
+            chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/requirements.txt"
+            log_info "Copied requirements.txt"
+        else
+            log_info "requirements.txt already in place"
+        fi
         
         # Install dependencies
         sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/pip" install -r "${INSTALL_DIR}/requirements.txt"
         
         log_success "Python dependencies installed"
     else
-        log_error "requirements.txt not found in current directory"
+        log_error "requirements.txt not found in ${SCRIPT_DIR}"
         exit 1
     fi
 }
@@ -138,12 +196,17 @@ copy_application_files() {
     local files=("app.py" "config.py" "gunicorn.conf.py")
     
     for file in "${files[@]}"; do
-        if [[ -f "${file}" ]]; then
-            cp "${file}" "${INSTALL_DIR}/"
-            chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${file}"
-            log_info "Copied ${file}"
+        if [[ -f "${SCRIPT_DIR}/${file}" ]]; then
+            # Don't copy if source and destination are the same
+            if [[ "${SCRIPT_DIR}/${file}" != "${INSTALL_DIR}/${file}" ]]; then
+                cp "${SCRIPT_DIR}/${file}" "${INSTALL_DIR}/"
+                chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/${file}"
+                log_info "Copied ${file}"
+            else
+                log_info "Skipped ${file} (source and destination are the same)"
+            fi
         else
-            log_error "Required file ${file} not found"
+            log_error "Required file ${file} not found in ${SCRIPT_DIR}"
             exit 1
         fi
     done
@@ -151,38 +214,67 @@ copy_application_files() {
     log_success "Application files copied"
 }
 
+# Generate a secure secret key
+generate_secret_key() {
+    python3 -c "import secrets; print(secrets.token_hex(32))"
+}
+
 # Setup environment configuration
 setup_environment() {
     log_info "Setting up environment configuration..."
     
-    if [[ -f ".env.example" ]]; then
-        cp ".env.example" "${INSTALL_DIR}/.env"
-        chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/.env"
-        chmod 600 "${INSTALL_DIR}/.env"  # Secure permissions for env file
-        
-        # Configure based on deployment mode
-        case "${DEPLOYMENT_MODE}" in
-            "localhost")
-                log_info "Configuring for Caddy on same server (127.0.0.1)"
-                sed -i 's/HOST=0.0.0.0/HOST=127.0.0.1/' "${INSTALL_DIR}/.env"
-                sed -i 's/# HOST=127.0.0.1/HOST=127.0.0.1/' "${INSTALL_DIR}/.env"
-                ;;
-            "network")
-                log_info "Configuring for Caddy on different server (0.0.0.0)"
-                # Default configuration is already set for network mode
-                ;;
-            "direct")
-                log_info "Configuring for direct external access (0.0.0.0)"
-                # Default configuration works for direct access too
-                ;;
-            *)
-                log_warning "Unknown deployment mode: ${DEPLOYMENT_MODE}, using network mode"
-                ;;
-        esac
-        
-        log_warning "Environment file created from template"
-        log_warning "Please edit ${INSTALL_DIR}/.env to configure your settings"
+    # Create .env file from template
+    if [[ -f "${SCRIPT_DIR}/.env.example" ]]; then
+        cp "${SCRIPT_DIR}/.env.example" "${INSTALL_DIR}/.env"
+    elif [[ ! -f "${INSTALL_DIR}/.env" ]]; then
+        log_warning ".env.example not found, creating basic .env file"
+        cat > "${INSTALL_DIR}/.env" << 'EOF'
+# IP Address Service - Environment Configuration
+FLASK_ENV=production
+SECRET_KEY=your-secret-key-here
+HOST=0.0.0.0
+PORT=5000
+PROXY_COUNT=1
+TRUSTED_PROXIES=127.0.0.1/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16
+GUNICORN_WORKERS=4
+LOG_LEVEL=INFO
+LOG_FILE=/opt/ip-service/logs/ip_service.log
+EOF
     fi
+    
+    # Set proper ownership and permissions
+    chown "${SERVICE_USER}:${SERVICE_GROUP}" "${INSTALL_DIR}/.env"
+    chmod 600 "${INSTALL_DIR}/.env"
+    
+    # Generate and set SECRET_KEY if it's the default value
+    if grep -q "SECRET_KEY=your-secret-key-here" "${INSTALL_DIR}/.env"; then
+        log_info "Generating secure SECRET_KEY..."
+        local secret_key
+        secret_key=$(generate_secret_key)
+        sed -i "s/SECRET_KEY=your-secret-key-here/SECRET_KEY=${secret_key}/" "${INSTALL_DIR}/.env"
+        log_success "SECRET_KEY generated and set"
+    else
+        log_info "SECRET_KEY already configured"
+    fi
+    
+    # Configure based on deployment mode
+    case "${DEPLOYMENT_MODE}" in
+        "localhost")
+            log_info "Configuring for Caddy on same server (127.0.0.1)"
+            sed -i 's/HOST=0.0.0.0/HOST=127.0.0.1/' "${INSTALL_DIR}/.env"
+            ;;
+        "network")
+            log_info "Configuring for Caddy on different server (0.0.0.0)"
+            sed -i 's/HOST=127.0.0.1/HOST=0.0.0.0/' "${INSTALL_DIR}/.env"
+            ;;
+        "direct")
+            log_info "Configuring for direct external access (0.0.0.0)"
+            sed -i 's/HOST=127.0.0.1/HOST=0.0.0.0/' "${INSTALL_DIR}/.env"
+            ;;
+        *)
+            log_warning "Unknown deployment mode: ${DEPLOYMENT_MODE}, using network mode"
+            ;;
+    esac
     
     log_success "Environment configuration setup complete"
 }
@@ -191,8 +283,8 @@ setup_environment() {
 install_systemd_service() {
     log_info "Installing systemd service..."
     
-    if [[ -f "ip-service.service" ]]; then
-        cp "ip-service.service" "${SYSTEMD_SERVICE_FILE}"
+    if [[ -f "${SCRIPT_DIR}/ip-service.service" ]]; then
+        cp "${SCRIPT_DIR}/ip-service.service" "${SYSTEMD_SERVICE_FILE}"
         
         # Reload systemd
         systemctl daemon-reload
@@ -202,9 +294,54 @@ install_systemd_service() {
         
         log_success "Systemd service installed and enabled"
     else
-        log_error "Systemd service file not found"
+        log_error "Systemd service file not found in ${SCRIPT_DIR}"
         exit 1
     fi
+}
+
+# Validate the configuration before starting
+validate_configuration() {
+    log_info "Validating configuration..."
+    
+    # Check if .env file exists and has required settings
+    if [[ ! -f "${INSTALL_DIR}/.env" ]]; then
+        log_error ".env file not found at ${INSTALL_DIR}/.env"
+        exit 1
+    fi
+    
+    # Check if SECRET_KEY is set
+    if grep -q "SECRET_KEY=your-secret-key-here" "${INSTALL_DIR}/.env"; then
+        log_error "SECRET_KEY not properly configured in .env file"
+        exit 1
+    fi
+    
+    # Test Python environment and imports
+    log_info "Testing Python environment..."
+    if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import app; print('App imported successfully')" &>/dev/null; then
+        log_error "Failed to import Flask application"
+        log_info "Testing imports individually..."
+        
+        # Test individual components
+        if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import flask; print('Flask OK')" 2>/dev/null; then
+            log_error "Flask import failed"
+        fi
+        
+        if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/python" -c "import config; print('Config OK')" 2>/dev/null; then
+            log_error "Config import failed"
+        fi
+        
+        exit 1
+    fi
+    
+    # Test gunicorn configuration
+    log_info "Testing Gunicorn configuration..."
+    cd "${INSTALL_DIR}"
+    if ! sudo -u "${SERVICE_USER}" "${VENV_DIR}/bin/gunicorn" --check-config --config gunicorn.conf.py app:app; then
+        log_error "Gunicorn configuration test failed"
+        exit 1
+    fi
+    
+    log_success "Configuration validation passed"
 }
 
 # Setup log rotation
@@ -258,31 +395,88 @@ setup_firewall() {
 test_installation() {
     log_info "Testing installation..."
     
+    # Validate configuration first
+    validate_configuration
+    
     # Start the service
+    log_info "Starting the service..."
     systemctl start "${SERVICE_NAME}"
     
     # Wait a moment for startup
-    sleep 3
+    sleep 5
     
     # Check service status
     if systemctl is-active --quiet "${SERVICE_NAME}"; then
         log_success "Service is running"
         
-        # Test health endpoint
-        local port=$(grep -oP 'PORT=\K\d+' "${INSTALL_DIR}/.env" 2>/dev/null || echo "5000")
-        if curl -f -s "http://127.0.0.1:${port}/health" > /dev/null; then
+        # Get the configured port
+        local port
+        port=$(grep -oP 'PORT=\K\d+' "${INSTALL_DIR}/.env" 2>/dev/null || echo "5000")
+        
+        # Get the configured host
+        local host
+        host=$(grep -oP 'HOST=\K[^\s]+' "${INSTALL_DIR}/.env" 2>/dev/null || echo "127.0.0.1")
+        
+        # Test health endpoint with retries
+        log_info "Testing health endpoint..."
+        local max_retries=5
+        local retry=0
+        local health_ok=false
+        
+        while [[ $retry -lt $max_retries ]]; do
+            if curl -f -s --max-time 5 "http://${host}:${port}/health" > /dev/null 2>&1; then
+                health_ok=true
+                break
+            fi
+            
+            retry=$((retry + 1))
+            if [[ $retry -lt $max_retries ]]; then
+                log_info "Health check attempt ${retry} failed, retrying in 2 seconds..."
+                sleep 2
+            fi
+        done
+        
+        if [[ "$health_ok" == "true" ]]; then
             log_success "Health check endpoint responding"
+            
+            # Test main endpoint
+            log_info "Testing main IP endpoint..."
+            local response
+            if response=$(curl -f -s --max-time 5 "http://${host}:${port}/"); then
+                if echo "$response" | grep -q '"status":"success"\|"status":"error"'; then
+                    log_success "Main endpoint responding with valid JSON"
+                else
+                    log_warning "Main endpoint responding but JSON format unexpected"
+                fi
+            else
+                log_warning "Main endpoint not responding (this may be normal if no IP is detected)"
+            fi
         else
-            log_warning "Health check endpoint not responding (this may be normal if not configured)"
+            log_warning "Health check endpoint not responding after ${max_retries} attempts"
+            log_warning "Service may need additional configuration"
         fi
         
         # Show service status
-        systemctl status "${SERVICE_NAME}" --no-pager -l
+        log_info "Service status:"
+        systemctl status "${SERVICE_NAME}" --no-pager -l | head -10
         
     else
         log_error "Service failed to start"
         log_error "Check logs with: journalctl -u ${SERVICE_NAME} -f"
+        
+        # Show recent logs
+        log_info "Recent service logs:"
+        journalctl -u "${SERVICE_NAME}" -n 20 --no-pager
+        
         exit 1
+    fi
+}
+
+# Cleanup function
+cleanup() {
+    if [[ -n "${TEMP_DIR:-}" && -d "$TEMP_DIR" ]]; then
+        log_info "Cleaning up temporary directory: $TEMP_DIR"
+        rm -rf "$TEMP_DIR"
     fi
 }
 
@@ -353,6 +547,7 @@ main() {
     
     # Show usage if help requested
     if [[ "$arg1" == "-h" || "$arg1" == "--help" ]]; then
+        echo "IP Address Service Deployment Script v${SCRIPT_VERSION}"
         echo "Usage: $0 [localhost|network|direct]"
         echo
         echo "Deployment modes:"
@@ -368,12 +563,29 @@ main() {
         echo "  $0 network      # Deploy for Caddy on different server"
         echo "  $0 localhost    # Deploy for Caddy on same server"
         echo "  $0 direct       # Deploy for direct external access"
+        echo
+        echo "The script will:"
+        echo "  - Install system dependencies"
+        echo "  - Create Python virtual environment"
+        echo "  - Install Python packages"
+        echo "  - Configure application files"
+        echo "  - Generate secure SECRET_KEY automatically"
+        echo "  - Install and enable systemd service"
+        echo "  - Test the installation"
         exit 0
     fi
     
-    log_info "Starting deployment of ${SERVICE_NAME} in ${DEPLOYMENT_MODE} mode..."
+    log_info "Starting deployment of ${SERVICE_NAME} v${SCRIPT_VERSION} in ${DEPLOYMENT_MODE} mode..."
     
+    # Set up cleanup on exit
+    trap cleanup EXIT
+    
+    # Validation steps
     check_root
+    validate_required_files
+    handle_installation_directory
+    
+    # Installation steps
     install_system_dependencies
     create_service_user
     create_directories

@@ -50,6 +50,27 @@ Health check endpoint for monitoring and load balancer probes.
 }
 ```
 
+## Quick Start (5 Minutes)
+
+The updated deployment script makes installation foolproof:
+
+```bash
+# Clone the repository
+git clone https://github.com/your-org/ip-service.git
+cd ip-service
+
+# Run the one-command deployment (uses network mode by default)
+sudo ./deploy.sh
+
+# That's it! The service is now running and ready for your Caddy configuration.
+```
+
+The script automatically:
+- Generates a secure SECRET_KEY
+- Configures networking for your setup
+- Tests everything before completing
+- Provides ready-to-use Caddy configuration examples
+
 ## Installation
 
 ### Prerequisites
@@ -59,13 +80,34 @@ Health check endpoint for monitoring and load balancer probes.
 - Caddy web server (already configured)
 - Root or sudo access for system installation
 
-### Automatic Installation
+### Recent Improvements
 
-1. **Download the application files** to your Flask server
+**Version 1.1.0** of the deployment script includes major robustness improvements:
+
+- **Smart Directory Handling**: Can be run from any directory, even the target installation directory
+- **Automatic SECRET_KEY Generation**: No more manual editing of configuration files
+- **Comprehensive Validation**: Validates all files, imports, and configuration before deployment
+- **Better Error Handling**: Clear error messages and automatic cleanup on failure
+- **Thorough Testing**: Tests all endpoints and provides detailed status reports
+- **Zero-Configuration**: Works out of the box for most common setups
+
+Users who had issues with previous versions should try the updated script!
+
+### Automatic Installation (Recommended)
+
+The deployment script now handles all edge cases and provides a robust installation experience:
+
+1. **Download or clone the project**:
+   ```bash
+   git clone https://github.com/your-org/ip-service.git
+   cd ip-service
+   ```
+
 2. **Make the deployment script executable**:
    ```bash
    chmod +x deploy.sh
    ```
+
 3. **Run the deployment script** with the appropriate mode:
 
    **For Caddy on different server (192.168.x.x) - Most Common:**
@@ -83,16 +125,40 @@ Health check endpoint for monitoring and load balancer probes.
    sudo ./deploy.sh direct
    ```
 
-The script will automatically:
-- Install system dependencies
-- Create a dedicated service user
-- Set up Python virtual environment
-- Install Python packages
-- Configure networking based on your mode
-- Configure systemd service
-- Set up log rotation
-- Configure firewall rules
-- Start the service
+   **Or simply run with defaults (network mode):**
+   ```bash
+   sudo ./deploy.sh
+   ```
+
+#### What the Script Does Automatically
+
+The enhanced deployment script will:
+- ✅ **Validate all required files** before starting
+- ✅ **Handle running from any directory** (even the target directory)
+- ✅ **Install system dependencies** (Python, pip, build tools)
+- ✅ **Create dedicated service user** (www-data)
+- ✅ **Set up Python virtual environment** with proper permissions
+- ✅ **Install all Python packages** from requirements.txt
+- ✅ **Copy and configure application files** with correct ownership
+- ✅ **Generate secure SECRET_KEY automatically** (no manual editing needed!)
+- ✅ **Configure networking** based on your chosen deployment mode
+- ✅ **Install and enable systemd service**
+- ✅ **Set up log rotation**
+- ✅ **Configure firewall rules** (if ufw is available)
+- ✅ **Validate configuration** and test all imports
+- ✅ **Test Gunicorn configuration** before starting
+- ✅ **Start the service** and verify it's working
+- ✅ **Test health and main endpoints** with retries
+- ✅ **Provide detailed status and next steps**
+
+#### Troubleshooting
+
+If the deployment fails, the script provides detailed error messages and logs. Common issues are now handled automatically:
+
+- **Missing files**: Script validates all required files exist
+- **Permission issues**: Script sets correct ownership and permissions
+- **Configuration errors**: Script validates configuration before starting
+- **Service startup**: Script tests the service thoroughly before completing
 
 ### Manual Installation
 
