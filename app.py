@@ -129,7 +129,7 @@ class IPAddressService:
     
     def __init__(self):
         """Initialize the IP address service with logging configuration."""
-        logger.info("Initializing IP Address Service v%s", getattr(config, 'APP_VERSION', '1.1.0'))
+        logger.info("Initializing IP Address Service v%s", getattr(config, 'APP_VERSION', '1.2.0'))
         logger.info("Configuration: Host=%s, Port=%s, Debug=%s", 
                    config.HOST, config.PORT, getattr(config, 'DEBUG', False))
         
@@ -425,6 +425,21 @@ def create_app():
     )
     
     logger.info(f"Flask app configured with {proxy_count} proxy layers")
+    
+    # Flask 3.0 compatible startup logging
+    @app.before_request
+    def startup_check():
+        """Log startup information once on first request."""
+        if not hasattr(app, '_startup_logged'):
+            logger.info("=" * 50)
+            logger.info(f"IP Address Service v{getattr(config, 'APP_VERSION', '1.2.0')} starting up")
+            logger.info(f"Environment: {getattr(config, 'FLASK_ENV', 'unknown')}")
+            logger.info(f"Debug mode: {getattr(config, 'DEBUG', False)}")
+            logger.info(f"Listening on: {config.HOST}:{config.PORT}")
+            logger.info(f"Proxy layers: {getattr(config, 'PROXY_COUNT', 1)}")
+            logger.info("=" * 50)
+            app._startup_logged = True
+    
     return app
 
 # Create the Flask app
@@ -528,7 +543,7 @@ def health_check():
             "status": "healthy",
             "timestamp": datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
             "service": getattr(config, 'APP_NAME', 'IP Address Service'),
-            "version": getattr(config, 'APP_VERSION', '1.1.0'),
+            "version": getattr(config, 'APP_VERSION', '1.2.0'),
             "environment": getattr(config, 'FLASK_ENV', 'unknown')
         }
         
@@ -565,7 +580,7 @@ def service_info():
     try:
         info_data = {
             "service": getattr(config, 'APP_NAME', 'IP Address Service'),
-            "version": getattr(config, 'APP_VERSION', '1.1.0'),
+            "version": getattr(config, 'APP_VERSION', '1.2.0'),
             "description": "A lightweight web service that returns client IP addresses in JSON format",
             "endpoints": {
                 "/": {
@@ -673,17 +688,6 @@ def internal_error(error):
     
     return jsonify(error_response), 500
 
-@app.before_first_request
-def startup_message():
-    """Log startup information."""
-    logger.info("=" * 50)
-    logger.info(f"IP Address Service v{getattr(config, 'APP_VERSION', '1.1.0')} starting up")
-    logger.info(f"Environment: {getattr(config, 'FLASK_ENV', 'unknown')}")
-    logger.info(f"Debug mode: {getattr(config, 'DEBUG', False)}")
-    logger.info(f"Listening on: {config.HOST}:{config.PORT}")
-    logger.info(f"Proxy layers: {getattr(config, 'PROXY_COUNT', 1)}")
-    logger.info("=" * 50)
-
 if __name__ == '__main__':
     # Configuration for different environments
     try:
@@ -711,3 +715,4 @@ if __name__ == '__main__':
     except Exception as e:
         logger.error(f"Failed to start application: {str(e)}", exc_info=True)
         sys.exit(1)
+

@@ -34,7 +34,7 @@ class BaseConfig:
     
     # Application Settings
     APP_NAME = 'IP Address Service'
-    APP_VERSION = '1.1.0'
+    APP_VERSION = '1.2.0'  # Updated version
     
     # Server Configuration with safe defaults
     HOST = os.getenv('HOST', '127.0.0.1')
