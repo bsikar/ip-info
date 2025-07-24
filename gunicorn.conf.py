@@ -7,13 +7,12 @@ for handling IP lookup requests efficiently and securely.
 
 import os
 import multiprocessing
-from config import get_config
-
-# Get configuration based on environment
-config = get_config()
 
 # Server socket configuration
-bind = f"{config.HOST}:{config.PORT}"
+# Get values directly from environment variables
+host = os.getenv('HOST', '127.0.0.1')
+port = int(os.getenv('PORT', 5000))
+bind = f"{host}:{port}"
 backlog = 2048
 
 # Worker process configuration
