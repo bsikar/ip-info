@@ -1,23 +1,23 @@
 #!/bin/bash
-"""
-IP Address Service - Production Deployment Script
-Automated deployment script for setting up the IP service on a production server.
-Handles virtual environment, dependencies, configuration, and systemd service setup.
-"""
+#
+# IP Address Service - Production Deployment Script
+# Automated deployment script for setting up the IP service on a production server.
+# Handles virtual environment, dependencies, configuration, and systemd service setup.
+#
 
 set -euo pipefail  # Exit on error, undefined vars, pipe failures
 
 # Configuration variables
 SERVICE_NAME="ip-service"
 SERVICE_USER="www-data"
-SERVICE_GROUP="www-data"
+SERVICE_GROUP="www-data" 
 INSTALL_DIR="/opt/${SERVICE_NAME}"
 VENV_DIR="${INSTALL_DIR}/venv"
 LOG_DIR="${INSTALL_DIR}/logs"
 SYSTEMD_SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 
-# Network configuration - choose deployment mode
-DEPLOYMENT_MODE="${1:-network}"  # 'localhost', 'network', or 'direct'
+# Global deployment mode variable
+DEPLOYMENT_MODE=""
 
 # Colors for output
 RED='\033[0;31m'
@@ -347,8 +347,12 @@ show_post_install_info() {
 
 # Main deployment function
 main() {
+    # Get first argument safely and set deployment mode
+    local arg1="${1:-}"
+    DEPLOYMENT_MODE="${arg1:-network}"  # 'localhost', 'network', or 'direct'
+    
     # Show usage if help requested
-    if [[ "$1" == "-h" || "$1" == "--help" ]]; then
+    if [[ "$arg1" == "-h" || "$arg1" == "--help" ]]; then
         echo "Usage: $0 [localhost|network|direct]"
         echo
         echo "Deployment modes:"
