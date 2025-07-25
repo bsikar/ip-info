@@ -116,22 +116,22 @@ class IPAddressService:
     
     # Private/internal IP ranges (RFC 1918, RFC 4193, etc.)
     PRIVATE_RANGES = [
-        ipaddress.IPv4Network('10.0.0.0/8'),       # Class A private
-        ipaddress.IPv4Network('172.16.0.0/12'),    # Class B private
-        ipaddress.IPv4Network('192.168.0.0/16'),   # Class C private
-        ipaddress.IPv4Network('127.0.0.0/8'),      # Loopback
-        ipaddress.IPv4Network('169.254.0.0/16'),   # Link-local
-        ipaddress.IPv4Network('224.0.0.0/4'),      # Multicast
-        ipaddress.IPv4Network('240.0.0.0/4'),      # Reserved
-        ipaddress.IPv4Network('0.0.0.0/8'),        # "This" network
-        ipaddress.IPv4Network('100.64.0.0/10'),    # RFC 6598 Carrier Grade NAT
+        ipaddress.IPv4Network('10.0.0.0/8'),      # Class A private
+        ipaddress.IPv4Network('172.16.0.0/12'),   # Class B private
+        ipaddress.IPv4Network('192.168.0.0/16'),  # Class C private
+        ipaddress.IPv4Network('127.0.0.0/8'),     # Loopback
+        ipaddress.IPv4Network('169.254.0.0/16'),  # Link-local
+        ipaddress.IPv4Network('224.0.0.0/4'),     # Multicast
+        ipaddress.IPv4Network('240.0.0.0/4'),     # Reserved
+        ipaddress.IPv4Network('0.0.0.0/8'),       # "This" network
+        ipaddress.IPv4Network('100.64.0.0/10'),   # RFC 6598 Carrier Grade NAT
     ]
     
     def __init__(self):
         """Initialize the IP address service with logging configuration."""
         logger.info("Initializing IP Address Service v%s", getattr(config, 'APP_VERSION', '1.2.0'))
         logger.info("Configuration: Host=%s, Port=%s, Debug=%s", 
-                   config.HOST, config.PORT, getattr(config, 'DEBUG', False))
+                    config.HOST, config.PORT, getattr(config, 'DEBUG', False))
         
     def is_private_ip(self, ip_str: str) -> bool:
         """
@@ -364,41 +364,28 @@ class IPAddressService:
         # Generate timestamp with timezone info
         timestamp = datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
         
+        # --- MODIFICATION START ---
+        # Format the response to match what the KMP app expects
         response_data = {
             "ip": ip_address,
-            "timestamp": timestamp,
-            "status": "success" if ip_address else "error"
+            "city": None,          # Geolocation is not performed by this service
+            "country": None,       # Geolocation is not performed by this service
+            "hostname": None,
+            "loc": None,
+            "org": None,
+            "postal": None,
+            "timezone": None,
+            "error": None
         }
-        
+
         if not ip_address:
             response_data["error"] = error_message or "Unable to determine public IP address"
-            response_data["message"] = "No valid public IPv4 address found in request"
         
-        # Add debug information in development mode or if explicitly enabled
-        include_debug = (getattr(config, 'FLASK_ENV', '') == 'development' or 
-                        getattr(config, 'ENABLE_DEBUG_HEADERS', False))
-        
-        if include_debug:
-            debug_info = {
-                "remote_addr": getattr(request_obj, 'remote_addr', 'unknown'),
-                "user_agent": request_obj.headers.get('User-Agent', 'Unknown')[:200],
-                "method": request_obj.method,
-                "path": request_obj.path
-            }
-            
-            # Add proxy headers for debugging
-            proxy_headers = {}
-            for header in self.PROXY_HEADERS:
-                value = request_obj.headers.get(header)
-                if value:
-                    proxy_headers[header] = value[:100]  # Truncate for safety
-            
-            if proxy_headers:
-                debug_info["proxy_headers"] = proxy_headers
-            
-            response_data["debug"] = debug_info
-        
+        # Log the generated response for debugging if needed
+        logger.debug(f"Generated response: {response_data}")
+
         return response_data
+        # --- MODIFICATION END ---
 
 
 # Initialize Flask application with proper error handling
@@ -494,7 +481,7 @@ def get_ip():
         # Log the request with additional context
         user_agent = request.headers.get('User-Agent', 'Unknown')[:100]
         logger.info(f"[{request_id}] IP request completed - Client: {client_ip}, "
-                   f"User-Agent: {user_agent}")
+                    f"User-Agent: {user_agent}")
         
         # Create JSON response with proper headers
         response = jsonify(response_data)
@@ -588,8 +575,14 @@ def service_info():
                     "description": "Returns the client's public IP address",
                     "response_format": {
                         "ip": "string|null",
-                        "timestamp": "ISO8601 timestamp",
-                        "status": "success|error"
+                        "city": "string|null",
+                        "country": "string|null",
+                        "hostname": "string|null",
+                        "loc": "string|null",
+                        "org": "string|null",
+                        "postal": "string|null",
+                        "timezone": "string|null",
+                        "error": "string|null"
                     }
                 },
                 "/health": {
